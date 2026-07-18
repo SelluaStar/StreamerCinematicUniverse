@@ -117,9 +117,7 @@ export function PlayerPane({
         <button onClick={onRemove} aria-label={`Remove ${stream.name}`}><X size={17} /></button>
       </div>
 
-      {blocked && <button className={styles.blocked} onClick={() => { setBlocked(false); onPaused(false); playerRef.current?.play(); }}><Play fill="currentColor" /> Click to start playback</button>}
-      {!ready && <div className={styles.playerLoading}><span />Connecting to Twitch…</div>}
-
+      {/* Top toolbar — kept clear of Twitch’s bottom mute/volume bar. */}
       <div className={styles.paneControls}>
         <div>
           <button onClick={() => onPaused(!paused)} aria-label={paused ? "Play stream" : "Pause stream"}>{paused ? <Play fill="currentColor" /> : <Pause fill="currentColor" />}</button>
@@ -164,6 +162,9 @@ export function PlayerPane({
           <button onClick={() => void playerRef.current?.requestFullscreen()} aria-label={`Fullscreen ${stream.name}`}><Maximize2 /></button>
         </div>
       </div>
+
+      {blocked && <button className={styles.blocked} onClick={() => { setBlocked(false); onPaused(false); playerRef.current?.play(); }}><Play fill="currentColor" /> Click to start playback</button>}
+      {!ready && <div className={styles.playerLoading}><span />Connecting to Twitch…</div>}
     </article>
   );
 }

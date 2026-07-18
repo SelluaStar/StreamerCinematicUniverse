@@ -146,21 +146,12 @@ function applyPaused(player: TwitchPlayerInstance, paused: boolean) {
   }
 }
 
-/** Twitch mute is independent of volume; always re-assert both so unmute is audible. */
+/** Twitch mute is independent of volume; always set both so unmute is audible. */
 function applyAudio(player: TwitchPlayerInstance, muted: boolean, volume: number) {
   const level = muted ? volume : Math.max(volume, 0.05);
   try {
     player.setMuted(muted);
     player.setVolume(level);
-    // Re-assert after a tick — embed UI / autoplay policies sometimes ignore the first call.
-    window.setTimeout(() => {
-      try {
-        player.setMuted(muted);
-        player.setVolume(level);
-      } catch {
-        /* player may have been destroyed */
-      }
-    }, 0);
   } catch {
     try {
       player.setMuted(muted);
@@ -189,8 +180,15 @@ export const TwitchPlayer = forwardRef<TwitchPlayerHandle, TwitchPlayerProps>(fu
   const pushAudio = (nextMuted: boolean, nextVolume: number) => {
     const player = playerRef.current;
     if (!player) return;
-    ignoreEmbedMuteUntilRef.current = Date.now() + 500;
+    ignoreEmbedMuteUntilRef.current = Date.now() + 750;
     applyAudio(player, nextMuted, nextVolume);
+    // One delayed re-assert for flaky autoplay — skip if intent already changed
+    // (avoids remuting after the viewer uses Twitch’s native unmute).
+    window.setTimeout(() => {
+      if (!playerRef.current) return;
+      if (settingsRef.current.muted !== nextMuted) return;
+      applyAudio(playerRef.current, settingsRef.current.muted, settingsRef.current.volume);
+    }, 40);
   };
 
   useEffect(() => {
@@ -260,8 +258,12 @@ export const TwitchPlayer = forwardRef<TwitchPlayerHandle, TwitchPlayerProps>(fu
       });
       playerRef.current = player;
       player.addEventListener(Player.READY, () => {
-        ignoreEmbedMuteUntilRef.current = Date.now() + 500;
+        ignoreEmbedMuteUntilRef.current = Date.now() + 750;
         applyAudio(player, settingsRef.current.muted, settingsRef.current.volume);
+        window.setTimeout(() => {
+          if (!playerRef.current || playerRef.current !== player) return;
+          applyAudio(player, settingsRef.current.muted, settingsRef.current.volume);
+        }, 40);
         if (settingsRef.current.captions) player.enableCaptions();
         if (settingsRef.current.paused) player.pause();
         callbacksRef.current.onReady?.();
@@ -295,7 +297,11 @@ export const TwitchPlayer = forwardRef<TwitchPlayerHandle, TwitchPlayerProps>(fu
       if (!player || !onChange || Date.now() < ignoreEmbedMuteUntilRef.current) return;
       try {
         const embedMuted = player.getMuted();
-        if (embedMuted !== settingsRef.current.muted) onChange(embedMuted);
+        if (embedMuted === settingsRef.current.muted) return;
+        // Adopt embed state immediately so a concurrent pushAudio won’t fight Twitch.
+        settingsRef.current = { ...settingsRef.current, muted: embedMuted };
+        ignoreEmbedMuteUntilRef.current = Date.now() + 400;
+        onChange(embedMuted);
       } catch {
         /* player may not be ready */
       }
