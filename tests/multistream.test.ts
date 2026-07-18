@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   buildLayoutTree,
   canPlaceChatBetween,
+  flattenChatStreamIds,
+  normalizeChatLayout,
   normalizeChatPlacement,
   normalizeChatStreamIds,
   type LayoutNode,
@@ -15,7 +17,9 @@ import type { Streamer } from "../lib/data";
 
 function paneIds(node: LayoutNode | null): string[] {
   if (!node) return [];
-  return node.type === "pane" ? [node.streamId] : [...paneIds(node.first), ...paneIds(node.second)];
+  if (node.type === "pane") return [node.streamId];
+  if (node.type === "chat") return [`chat:${node.panelId}`];
+  return [...paneIds(node.first), ...paneIds(node.second)];
 }
 
 describe("multistream layout templates", () => {
@@ -39,6 +43,18 @@ describe("multistream layout templates", () => {
   it("focuses the selected stream", () => {
     expect(buildLayoutTree(["one", "two"], "focus", "two")).toMatchObject({ type: "pane", streamId: "two" });
   });
+
+  it("places inline chat tiles beside streams in the canvas tree", () => {
+    const tree = buildLayoutTree(
+      [
+        { kind: "stream", id: "one" },
+        { kind: "chat", id: "cp-1" },
+        { kind: "stream", id: "two" },
+      ],
+      "auto",
+    );
+    expect(paneIds(tree)).toEqual(["one", "chat:cp-1", "two"]);
+  });
 });
 
 describe("multi-chat workspace helpers", () => {
@@ -54,6 +70,46 @@ describe("multi-chat workspace helpers", () => {
 
   it("falls back to legacy chatStreamId", () => {
     expect(normalizeChatStreamIds(streams, undefined, "a")).toEqual(["a"]);
+  });
+
+  it("migrates legacy chatStreamIds into a side chat panel", () => {
+    const layout = normalizeChatLayout(streams, { chatStreamIds: ["b", "a"], chatPlacement: "side" });
+    expect(layout.chatPanels).toHaveLength(1);
+    expect(layout.chatPanels[0].streamIds).toEqual(["b", "a"]);
+    expect(layout.sideChatPanelIds).toEqual([layout.chatPanels[0].id]);
+    expect(layout.betweenChatPanelId).toBeUndefined();
+    expect(flattenChatStreamIds(layout.chatPanels)).toEqual(["b", "a"]);
+  });
+
+  it("migrates chat-between placement onto the first panel", () => {
+    const two = streams.filter((stream) => stream.id === "a" || stream.id === "b");
+    const layout = normalizeChatLayout(two, { chatStreamIds: ["a"], chatPlacement: "between" });
+    expect(layout.betweenChatPanelId).toBe(layout.chatPanels[0].id);
+    expect(layout.sideChatPanelIds).toEqual([]);
+    expect(layout.chatPlacement).toBe("between");
+  });
+
+  it("keeps explicit multi-panel payloads", () => {
+    const layout = normalizeChatLayout(streams, {
+      chatPanels: [
+        { id: "cp-1", streamIds: ["a"] },
+        { id: "cp-2", streamIds: ["b"] },
+      ],
+      sideChatPanelIds: ["cp-1"],
+      canvasTiles: [
+        { kind: "stream", id: "a" },
+        { kind: "chat", id: "cp-2" },
+        { kind: "stream", id: "b" },
+      ],
+    });
+    expect(layout.chatPanels.map((panel) => panel.id)).toEqual(["cp-1", "cp-2"]);
+    expect(layout.sideChatPanelIds).toEqual(["cp-1"]);
+    expect(layout.canvasTiles).toEqual([
+      { kind: "stream", id: "a" },
+      { kind: "chat", id: "cp-2" },
+      { kind: "stream", id: "b" },
+      { kind: "stream", id: "c" },
+    ]);
   });
 
   it("allows chat-between only for two-pane non-focus layouts", () => {
@@ -90,7 +146,14 @@ describe("share state and Twitch channel parsing", () => {
 
   it("round-trips a valid workspace without selecting an absent chat", () => {
     const query = serializeSharedWorkspace({ logins: ["one", "two"], layout: "focus", chats: ["missing"], chat: "missing" });
-    expect(parseSharedWorkspace(query)).toEqual({ logins: ["one", "two"], layout: "focus", chats: [], chat: undefined, chatPlacement: undefined });
+    expect(parseSharedWorkspace(query)).toEqual({
+      logins: ["one", "two"],
+      layout: "focus",
+      chats: [],
+      chat: undefined,
+      chatPanels: undefined,
+      chatPlacement: undefined,
+    });
   });
 
   it("round-trips chat-between placement in share links", () => {
@@ -105,5 +168,17 @@ describe("share state and Twitch channel parsing", () => {
       chats: ["one"],
       chatPlacement: "between",
     });
+  });
+
+  it("round-trips multi-panel chats via chatPanels", () => {
+    const query = serializeSharedWorkspace({
+      logins: ["one", "two", "three"],
+      layout: "auto",
+      chats: ["one", "two", "three"],
+      chatPanels: [["one", "two"], ["three"]],
+    });
+    const parsed = parseSharedWorkspace(query);
+    expect(parsed.chatPanels).toEqual([["one", "two"], ["three"]]);
+    expect(parsed.chats).toEqual(["one", "two", "three"]);
   });
 });

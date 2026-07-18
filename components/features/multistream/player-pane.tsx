@@ -54,6 +54,25 @@ export function PlayerPane({
     setQualities(playerRef.current?.getQualities() || []);
   }, []);
 
+  const syncMutedFromEmbed = useCallback((value: boolean) => {
+    if (value !== muted) onMuted(value);
+  }, [muted, onMuted]);
+
+  const toggleMuted = () => {
+    // Prefer live embed state so a Twitch-native mute still toggles correctly in one click.
+    let currentlyMuted = muted;
+    try {
+      currentlyMuted = playerRef.current?.getMuted() ?? muted;
+    } catch {
+      currentlyMuted = muted;
+    }
+    const next = !currentlyMuted;
+    const level = next ? volume : Math.max(volume, 0.05);
+    playerRef.current?.applyAudio(next, level);
+    onMuted(next);
+    if (!next && volume < 0.05) onVolume(level);
+  };
+
   const channel = stream.login || stream.handle;
   useEffect(() => {
     setReady(false);
@@ -82,6 +101,7 @@ export function PlayerPane({
           onReady={readyPlayer}
           onOnlineChange={onlineChanged}
           onBlocked={blockedPlayback}
+          onMutedChange={syncMutedFromEmbed}
         />
       ) : (
         <div className={styles.unsupported}>
@@ -104,7 +124,7 @@ export function PlayerPane({
         <div>
           <button onClick={() => onPaused(!paused)} aria-label={paused ? "Play stream" : "Pause stream"}>{paused ? <Play fill="currentColor" /> : <Pause fill="currentColor" />}</button>
           <div className={styles.audioControl}>
-            <button onClick={() => onMuted(!muted)} aria-label={muted ? "Unmute stream" : "Mute stream"}>{muted ? <VolumeX /> : <Volume2 />}</button>
+            <button onClick={toggleMuted} aria-label={muted ? "Unmute stream" : "Mute stream"}>{muted ? <VolumeX /> : <Volume2 />}</button>
             <label className={styles.volumeControl}>
               <span className="sr-only">Volume for {stream.name}</span>
               <input
@@ -116,8 +136,10 @@ export function PlayerPane({
                 style={{ "--volume-level": `${(muted ? 0 : volume) * 100}%` } as React.CSSProperties}
                 onChange={(event) => {
                   const value = Number(event.target.value);
+                  const nextMuted = value <= 0;
+                  playerRef.current?.applyAudio(nextMuted, nextMuted ? volume : value);
                   onVolume(value);
-                  if (muted && value > 0) onMuted(false);
+                  if (muted !== nextMuted) onMuted(nextMuted);
                 }}
               />
               <output>{Math.round((muted ? 0 : volume) * 100)}%</output>

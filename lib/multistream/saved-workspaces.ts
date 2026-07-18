@@ -1,5 +1,5 @@
 import type { Streamer } from "@/lib/data";
-import type { ChatPlacement, LayoutTemplate } from "@/components/features/multistream/use-workspace";
+import type { CanvasTile, ChatPanel, ChatPlacement, LayoutTemplate } from "@/components/features/multistream/use-workspace";
 import { createClient } from "@/lib/supabase/client";
 
 function normalizeChatPlacement(value?: string): ChatPlacement {
@@ -13,9 +13,14 @@ export interface SavedWorkspace {
   updatedAt: string;
   streams: Streamer[];
   template: LayoutTemplate;
-  /** Ordered open chat panes. */
+  /** Panel-based chat layout (preferred). */
+  chatPanels?: ChatPanel[];
+  sideChatPanelIds?: string[];
+  betweenChatPanelId?: string;
+  canvasTiles?: CanvasTile[];
+  /** Flattened open chat panes (compat). */
   chatStreamIds?: string[];
-  /** @deprecated Prefer chatStreamIds; kept for older saved payloads. */
+  /** @deprecated Prefer chatStreamIds / chatPanels; kept for older saved payloads. */
   chatStreamId?: string;
   chatPlacement?: ChatPlacement;
 }
@@ -61,6 +66,10 @@ function toPayload(workspace: SavedWorkspace) {
   return {
     streams: workspace.streams,
     template: workspace.template,
+    chatPanels: workspace.chatPanels,
+    sideChatPanelIds: workspace.sideChatPanelIds,
+    betweenChatPanelId: workspace.betweenChatPanelId,
+    canvasTiles: workspace.canvasTiles,
     chatStreamIds: workspace.chatStreamIds,
     chatStreamId: workspace.chatStreamIds?.[0] ?? workspace.chatStreamId,
     chatPlacement: workspace.chatPlacement,
@@ -76,6 +85,10 @@ function fromRow(row: { id: string; name: string; payload: Record<string, unknow
     name: row.name,
     streams: payload.streams,
     template: payload.template,
+    chatPanels: payload.chatPanels as ChatPanel[] | undefined,
+    sideChatPanelIds: payload.sideChatPanelIds as string[] | undefined,
+    betweenChatPanelId: payload.betweenChatPanelId as string | undefined,
+    canvasTiles: payload.canvasTiles as CanvasTile[] | undefined,
     chatStreamIds: payload.chatStreamIds,
     chatStreamId: payload.chatStreamId,
     chatPlacement: payload.chatPlacement !== undefined
@@ -129,6 +142,10 @@ export function saveWorkspace(input: {
   name: string;
   streams: Streamer[];
   template: LayoutTemplate;
+  chatPanels?: ChatPanel[];
+  sideChatPanelIds?: string[];
+  betweenChatPanelId?: string;
+  canvasTiles?: CanvasTile[];
   chatStreamIds?: string[];
   chatStreamId?: string;
   chatPlacement?: ChatPlacement;
@@ -138,14 +155,20 @@ export function saveWorkspace(input: {
   const existingIndex = input.id ? all.findIndex((workspace) => workspace.id === input.id) : -1;
   const chatStreamIds = input.chatStreamIds?.length
     ? input.chatStreamIds
-    : input.chatStreamId
-      ? [input.chatStreamId]
-      : [];
+    : input.chatPanels?.length
+      ? input.chatPanels.flatMap((panel) => panel.streamIds)
+      : input.chatStreamId
+        ? [input.chatStreamId]
+        : [];
   const record: SavedWorkspace = {
     id: existingIndex >= 0 && input.id ? input.id : `ws-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     name: input.name.trim().slice(0, 60) || "Untitled watchspace",
     streams: input.streams,
     template: input.template,
+    chatPanels: input.chatPanels,
+    sideChatPanelIds: input.sideChatPanelIds,
+    betweenChatPanelId: input.betweenChatPanelId,
+    canvasTiles: input.canvasTiles,
     chatStreamIds,
     chatStreamId: chatStreamIds[0],
     chatPlacement: normalizeChatPlacement(input.chatPlacement),

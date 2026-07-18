@@ -42,7 +42,7 @@ import {
 } from "@/lib/streamer-awards";
 import { useTheme, type Theme } from "@/components/theme-provider";
 import { MultistreamPage as TwitchMultistreamPage } from "@/components/features/multistream/multistream-page";
-import { TwitchPlayer } from "@/components/features/player/twitch-player";
+import { TwitchPlayer, type TwitchPlayerHandle } from "@/components/features/player/twitch-player";
 import { channelSearchToStreamer, searchTwitchChannels, useTwitchCategories, useTwitchStreams } from "@/components/features/twitch/use-twitch-data";
 import { ClipsSection } from "@/components/features/clips/clips-section";
 import { AuthRoute } from "@/components/auth/auth-route";
@@ -1186,6 +1186,7 @@ function StreamerPage({ slug, announce }: { slug: string; announce: (message: st
   const [paused, setPaused] = useState(false);
   const [showChat, setShowChat] = useState(true);
   const [chatEmbed, setChatEmbed] = useState({ parentQuery: "parent=localhost", dark: true });
+  const playerRef = useRef<TwitchPlayerHandle>(null);
 
   useEffect(() => {
     let active = true;
@@ -1307,10 +1308,12 @@ function StreamerPage({ slug, announce }: { slug: string; announce: (message: st
         <div className="creator-player-shell">
           <div className="creator-player">
             <TwitchPlayer
+              ref={playerRef}
               channel={channelLogin}
               muted={muted}
               paused={paused}
               volume={0.7}
+              onMutedChange={(value) => { if (value !== muted) setMuted(value); }}
             />
           </div>
           <div className="creator-player-bar">
@@ -1318,7 +1321,21 @@ function StreamerPage({ slug, announce }: { slug: string; announce: (message: st
               {paused ? <Play size={16} /> : <Pause size={16} />}
               <span>{paused ? "Play" : "Pause"}</span>
             </button>
-            <button type="button" onClick={() => setMuted((value) => !value)} aria-label={muted ? "Unmute" : "Mute"}>
+            <button
+              type="button"
+              onClick={() => {
+                let currentlyMuted = muted;
+                try {
+                  currentlyMuted = playerRef.current?.getMuted() ?? muted;
+                } catch {
+                  currentlyMuted = muted;
+                }
+                const next = !currentlyMuted;
+                playerRef.current?.applyAudio(next, 0.7);
+                setMuted(next);
+              }}
+              aria-label={muted ? "Unmute" : "Mute"}
+            >
               {muted ? <VolumeX size={16} /> : <Volume2 size={16} />}
               <span>{muted ? "Unmute" : "Mute"}</span>
             </button>
@@ -1739,19 +1756,24 @@ function SavedPage({ announce }: { announce: (message: string) => void }) {
                       type="button"
                       className="button glass"
                       onClick={() => {
-                        const chatIds = ws.chatStreamIds?.length
-                          ? ws.chatStreamIds
-                          : ws.chatStreamId
-                            ? [ws.chatStreamId]
-                            : [];
-                        const chats = chatIds
-                          .map((id) => ws.streams.find((stream) => stream.id === id))
-                          .filter((stream): stream is NonNullable<typeof stream> => Boolean(stream))
-                          .map((stream) => stream.login || stream.handle);
+                        const chatPanels = (ws.chatPanels?.length
+                          ? ws.chatPanels.map((panel) => panel.streamIds)
+                          : [(ws.chatStreamIds?.length
+                            ? ws.chatStreamIds
+                            : ws.chatStreamId
+                              ? [ws.chatStreamId]
+                              : [])])
+                          .map((ids) => ids
+                            .map((id) => ws.streams.find((stream) => stream.id === id))
+                            .filter((stream): stream is NonNullable<typeof stream> => Boolean(stream))
+                            .map((stream) => stream.login || stream.handle))
+                          .filter((panel) => panel.length);
+                        const chats = chatPanels.flat();
                         const query = serializeSharedWorkspace({
                           logins: ws.streams.map((stream) => stream.login || stream.handle),
                           layout: ws.template,
                           chats,
+                          chatPanels,
                           chat: chats[0],
                           chatPlacement: ws.chatPlacement,
                         });

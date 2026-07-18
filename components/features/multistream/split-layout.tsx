@@ -15,6 +15,8 @@ interface SplitLayoutProps {
   /** When true with exactly two streams, render chat in the middle column. */
   chatBetween?: boolean;
   chatNode?: ReactNode;
+  /** Inline chat panel renderer for first-class chat tiles in the layout tree. */
+  renderChatPanel?: (panelId: string, compact?: boolean) => ReactNode;
   onState: (action: {
     type: "muted" | "paused" | "volume" | "captions";
     id: string;
@@ -49,14 +51,15 @@ export function SplitLayout(props: SplitLayoutProps) {
   }, []);
 
   const streamKey = props.state.streams.map((stream) => stream.id).join("\0");
+  const tileKey = props.state.canvasTiles.map((tile) => `${tile.kind}:${tile.id}`).join("\0");
   const chatBetween = Boolean(props.chatBetween && props.state.streams.length === 2 && props.chatNode);
   const shellKey = props.mobileStack
     ? `stack:${streamKey}`
     : props.mobileActiveId
       ? `tabs:${props.mobileActiveId}:${streamKey}`
       : chatBetween
-        ? `between:${props.state.rootOrientation ?? "horizontal"}:${streamKey}`
-        : `tree:${props.state.template}:${props.state.focusedId ?? ""}:${props.state.rootOrientation ?? ""}:${streamKey}`;
+        ? `between:${props.state.rootOrientation ?? "horizontal"}:${streamKey}:${props.state.betweenChatPanelId ?? ""}`
+        : `tree:${props.state.template}:${props.state.focusedId ?? ""}:${props.state.rootOrientation ?? ""}:${tileKey}`;
 
   // After the shell commits, refs have populated slotsRef — one re-render moves portals into place.
   useLayoutEffect(() => {
@@ -126,7 +129,15 @@ export function SplitLayout(props: SplitLayoutProps) {
       </Group>
     );
   } else {
-    shell = <Node node={props.tree} setSlot={setSlot} state={props.state} onLayout={props.onLayout} />;
+    shell = (
+      <Node
+        node={props.tree}
+        setSlot={setSlot}
+        state={props.state}
+        onLayout={props.onLayout}
+        renderChatPanel={props.renderChatPanel}
+      />
+    );
   }
 
   return (
@@ -188,23 +199,36 @@ function Node({
   setSlot,
   state,
   onLayout,
+  renderChatPanel,
 }: {
   node: LayoutNode;
   setSlot: (id: string, el: HTMLElement | null) => void;
   state: WorkspaceState;
   onLayout: (id: string, layout: Layout) => void;
+  renderChatPanel?: (panelId: string, compact?: boolean) => ReactNode;
 }) {
   if (node.type === "pane") {
     return <PaneSlot id={node.streamId} className={styles.paneSlot} setSlot={setSlot} />;
   }
-  const countPanes = (value: LayoutNode): number => (value.type === "pane" ? 1 : countPanes(value.first) + countPanes(value.second));
+  if (node.type === "chat") {
+    return (
+      <div className={`${styles.paneSlot} ${styles.chatInlinePane}`}>
+        {renderChatPanel?.(node.panelId, true)}
+      </div>
+    );
+  }
+  const countLeaves = (value: LayoutNode): number => (
+    value.type === "split" ? countLeaves(value.first) + countLeaves(value.second) : 1
+  );
   const firstSize = state.template === "equal"
-    ? (countPanes(node.first) / countPanes(node)) * 100
+    ? (countLeaves(node.first) / countLeaves(node)) * 100
     : 50;
   const defaultLayout = state.layouts[node.id] || {
     [`${node.id}-first`]: firstSize,
     [`${node.id}-second`]: 100 - firstSize,
   };
+  const firstIsChat = node.first.type === "chat";
+  const secondIsChat = node.second.type === "chat";
   return (
     <Group
       id={node.id}
@@ -213,14 +237,24 @@ function Node({
       defaultLayout={defaultLayout}
       onLayoutChanged={(layout, meta) => { if (meta.isUserInteraction) onLayout(node.id, layout); }}
     >
-      <Panel id={`${node.id}-first`} minSize="20%">
-        <Node node={node.first} setSlot={setSlot} state={state} onLayout={onLayout} />
+      <Panel
+        id={`${node.id}-first`}
+        minSize={firstIsChat ? "14%" : "20%"}
+        maxSize={firstIsChat ? "42%" : undefined}
+        className={firstIsChat ? styles.chatBetweenPanel : undefined}
+      >
+        <Node node={node.first} setSlot={setSlot} state={state} onLayout={onLayout} renderChatPanel={renderChatPanel} />
       </Panel>
       <Separator className={`${styles.resizeHandle} ${node.orientation === "vertical" ? styles.horizontalResizeHandle : styles.verticalResizeHandle}`}>
         <span />
       </Separator>
-      <Panel id={`${node.id}-second`} minSize="20%">
-        <Node node={node.second} setSlot={setSlot} state={state} onLayout={onLayout} />
+      <Panel
+        id={`${node.id}-second`}
+        minSize={secondIsChat ? "14%" : "20%"}
+        maxSize={secondIsChat ? "42%" : undefined}
+        className={secondIsChat ? styles.chatBetweenPanel : undefined}
+      >
+        <Node node={node.second} setSlot={setSlot} state={state} onLayout={onLayout} renderChatPanel={renderChatPanel} />
       </Panel>
     </Group>
   );

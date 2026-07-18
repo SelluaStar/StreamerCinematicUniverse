@@ -8,3 +8,4 @@ coverage
 npm-debug.log*
 tmp/
 eslint-out2.txt
+.vercel

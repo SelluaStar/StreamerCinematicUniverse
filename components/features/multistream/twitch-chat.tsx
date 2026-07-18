@@ -1,36 +1,48 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { closestCenter, DndContext, KeyboardSensor, PointerSensor, useSensor, useSensors, type DragEndEvent } from "@dnd-kit/core";
-import { SortableContext, useSortable, verticalListSortingStrategy, sortableKeyboardCoordinates } from "@dnd-kit/sortable";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useDroppable, type DraggableAttributes, type DraggableSyntheticListeners } from "@dnd-kit/core";
+import { SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { Columns2, GripVertical, MessageSquareText, PanelRight, Plus, X } from "lucide-react";
 import type { Streamer } from "@/lib/data";
-import type { ChatPlacement } from "@/components/features/multistream/use-workspace";
+import {
+  CHAT_DOCK_DROP_ID,
+  chatDragId,
+  chatPanelDropId,
+  type ChatPlacement,
+} from "@/components/features/multistream/use-workspace";
 import { getTwitchEmbedParentQuery } from "@/lib/twitch/embed-parents";
 import { SelectMenu } from "@/components/ui/select-menu";
 import styles from "./multistream.module.css";
 
 export function TwitchChat({
+  panelId,
   streams,
   chatStreamIds,
+  occupiedChatIds,
   chatPlacement,
   canChatBetween,
   compact,
+  tileSortable,
   onAdd,
   onRemove,
-  onReorder,
   onHide,
   onChatPlacement,
 }: {
+  panelId: string;
   streams: Streamer[];
+  /** Chats stacked in this panel. */
   chatStreamIds: string[];
+  /** All open chats across panels — used to hide already-open options in Add. */
+  occupiedChatIds?: string[];
   chatPlacement?: ChatPlacement;
   canChatBetween?: boolean;
-  /** Narrow middle-column styling. */
+  /** Narrow middle-column / inline styling. */
   compact?: boolean;
+  /** When true, the panel shell can be reordered among canvas tiles. */
+  tileSortable?: boolean;
   onAdd: (id: string) => void;
   onRemove: (id: string) => void;
-  onReorder: (activeId: string, overId: string) => void;
   onHide: () => void;
   onChatPlacement?: (placement: ChatPlacement) => void;
 }) {
@@ -41,12 +53,9 @@ export function TwitchChat({
       .filter((stream): stream is Streamer => Boolean(stream)),
     [chatStreamIds, twitchStreams],
   );
-  const addable = twitchStreams.filter((stream) => !chatStreamIds.includes(stream.id));
+  const taken = new Set(occupiedChatIds ?? chatStreamIds);
+  const addable = twitchStreams.filter((stream) => !taken.has(stream.id));
   const [embed, setEmbed] = useState({ parentQuery: "parent=localhost", dark: false });
-  const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
-  );
 
   useEffect(() => {
     const update = () => setEmbed({
@@ -79,9 +88,109 @@ export function TwitchChat({
     );
   }
 
+  const bodyProps = {
+    panelId,
+    openChats,
+    addable,
+    embed,
+    placementToggle,
+    onAdd,
+    onRemove,
+    onHide,
+  };
+
+  if (tileSortable) {
+    return (
+      <SortableChatShell panelId={panelId} compact={compact}>
+        {(tileHandle) => <ChatPanelBody {...bodyProps} tileHandle={tileHandle} />}
+      </SortableChatShell>
+    );
+  }
+
+  return (
+    <DroppableChatShell panelId={panelId} compact={compact}>
+      <ChatPanelBody {...bodyProps} />
+    </DroppableChatShell>
+  );
+}
+
+function DroppableChatShell({
+  panelId,
+  compact,
+  children,
+}: {
+  panelId: string;
+  compact?: boolean;
+  children: ReactNode;
+}) {
+  const { setNodeRef, isOver } = useDroppable({ id: chatPanelDropId(panelId) });
+  return (
+    <aside
+      ref={setNodeRef}
+      className={`${styles.chatPanel} ${compact ? styles.chatPanelCompact : ""} ${isOver ? styles.chatPanelDropOver : ""}`}
+      aria-label="Twitch chats"
+      data-chat-panel={panelId}
+    >
+      {children}
+    </aside>
+  );
+}
+
+function SortableChatShell({
+  panelId,
+  compact,
+  children,
+}: {
+  panelId: string;
+  compact?: boolean;
+  children: (tileHandle: { attributes: DraggableAttributes; listeners: DraggableSyntheticListeners }) => ReactNode;
+}) {
+  const { setNodeRef: setDropRef, isOver } = useDroppable({ id: chatPanelDropId(panelId) });
+  const tile = useSortable({
+    id: panelId,
+    animateLayoutChanges: () => false,
+  });
+  const setRef = (el: HTMLElement | null) => {
+    setDropRef(el);
+    tile.setNodeRef(el);
+  };
+  return (
+    <aside
+      ref={setRef}
+      className={`${styles.chatPanel} ${compact ? styles.chatPanelCompact : ""} ${isOver ? styles.chatPanelDropOver : ""} ${tile.isDragging ? styles.chatPaneDragging : ""}`}
+      style={tile.isDragging ? { opacity: 0.35, transition: tile.transition } : undefined}
+      aria-label="Twitch chats"
+      data-chat-panel={panelId}
+    >
+      {children({ attributes: tile.attributes, listeners: tile.listeners })}
+    </aside>
+  );
+}
+
+function ChatPanelBody({
+  panelId,
+  openChats,
+  addable,
+  embed,
+  placementToggle,
+  tileHandle,
+  onAdd,
+  onRemove,
+  onHide,
+}: {
+  panelId: string;
+  openChats: Streamer[];
+  addable: Streamer[];
+  embed: { parentQuery: string; dark: boolean };
+  placementToggle: ReactNode;
+  tileHandle?: { attributes: DraggableAttributes; listeners: DraggableSyntheticListeners };
+  onAdd: (id: string) => void;
+  onRemove: (id: string) => void;
+  onHide: () => void;
+}) {
   if (!openChats.length) {
     return (
-      <aside className={`${styles.chatPanel} ${compact ? styles.chatPanelCompact : ""}`} aria-label="Twitch chats">
+      <>
         <div className={styles.chatColumnHeader}>
           <span>Chats</span>
           <div className={styles.chatColumnActions}>
@@ -108,18 +217,18 @@ export function TwitchChat({
             />
           </div>
         )}
-      </aside>
+      </>
     );
   }
 
-  const dragEnded = ({ active, over }: DragEndEvent) => {
-    if (!over || active.id === over.id) return;
-    onReorder(String(active.id), String(over.id));
-  };
-
   return (
-    <aside className={`${styles.chatPanel} ${compact ? styles.chatPanelCompact : ""}`} aria-label="Twitch chats">
+    <>
       <div className={styles.chatColumnHeader}>
+        {tileHandle && (
+          <button type="button" className={styles.chatDragHandle} {...tileHandle.attributes} {...tileHandle.listeners} aria-label="Move chat panel">
+            <GripVertical size={16} />
+          </button>
+        )}
         <span>Chats</span>
         <strong>{openChats.length}</strong>
         <div className={styles.chatColumnActions}>
@@ -128,21 +237,20 @@ export function TwitchChat({
         </div>
       </div>
 
-      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={dragEnded}>
-        <SortableContext items={openChats.map((stream) => stream.id)} strategy={verticalListSortingStrategy}>
-          <div className={styles.chatStack}>
-            {openChats.map((stream) => (
-              <SortableChatPane
-                key={stream.id}
-                stream={stream}
-                parentQuery={embed.parentQuery}
-                dark={embed.dark}
-                onRemove={() => onRemove(stream.id)}
-              />
-            ))}
-          </div>
-        </SortableContext>
-      </DndContext>
+      <SortableContext items={openChats.map((stream) => chatDragId(panelId, stream.id))} strategy={verticalListSortingStrategy}>
+        <div className={styles.chatStack}>
+          {openChats.map((stream) => (
+            <SortableChatPane
+              key={stream.id}
+              panelId={panelId}
+              stream={stream}
+              parentQuery={embed.parentQuery}
+              dark={embed.dark}
+              onRemove={() => onRemove(stream.id)}
+            />
+          ))}
+        </div>
+      </SortableContext>
 
       {addable.length > 0 && (
         <div className={styles.chatAddRow}>
@@ -159,24 +267,27 @@ export function TwitchChat({
           />
         </div>
       )}
-    </aside>
+    </>
   );
 }
 
 function SortableChatPane({
+  panelId,
   stream,
   parentQuery,
   dark,
   onRemove,
 }: {
+  panelId: string;
   stream: Streamer;
   parentQuery: string;
   dark: boolean;
   onRemove: () => void;
 }) {
   const { attributes, listeners, setNodeRef, transition, isDragging } = useSortable({
-    id: stream.id,
+    id: chatDragId(panelId, stream.id),
     animateLayoutChanges: () => false,
+    data: { type: "chat", panelId, streamId: stream.id },
   });
   const channel = stream.login || stream.handle;
   const src = `https://www.twitch.tv/embed/${encodeURIComponent(channel)}/chat?${parentQuery}${dark ? "&darkpopout" : ""}`;
@@ -189,7 +300,7 @@ function SortableChatPane({
       aria-label={`${stream.name} chat`}
     >
       <div className={styles.chatHeader}>
-        <button type="button" className={styles.chatDragHandle} {...attributes} {...listeners} aria-label={`Reorder ${stream.name} chat`}>
+        <button type="button" className={styles.chatDragHandle} {...attributes} {...listeners} aria-label={`Move ${stream.name} chat`}>
           <GripVertical size={16} />
         </button>
         <span className={styles.chatPaneName}>{stream.name}</span>
@@ -202,5 +313,21 @@ function SortableChatPane({
         sandbox="allow-storage-access-by-user-activation allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals"
       />
     </section>
+  );
+}
+
+/** Drop target for creating / docking a chat panel in the side column. */
+export function ChatSideDock({
+  children,
+  className,
+}: {
+  children: ReactNode;
+  className?: string;
+}) {
+  const { setNodeRef, isOver } = useDroppable({ id: CHAT_DOCK_DROP_ID });
+  return (
+    <div ref={setNodeRef} className={`${className || ""} ${isOver ? styles.chatDockDropOver : ""}`.trim()}>
+      {children}
+    </div>
   );
 }

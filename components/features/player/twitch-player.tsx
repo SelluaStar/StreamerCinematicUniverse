@@ -39,7 +39,11 @@ export interface TwitchPlayerHandle {
   play(): void;
   pause(): void;
   setMuted(value: boolean): void;
+  getMuted(): boolean;
   setVolume(value: number): void;
+  getVolume(): number;
+  /** Force mute + volume onto the embed even when React props did not change. */
+  applyAudio(muted: boolean, volume: number): void;
   setCaptions(value: boolean): void;
   isPaused(): boolean;
   getQualities(): Array<{ group: string; name: string }>;
@@ -57,6 +61,8 @@ interface TwitchPlayerProps {
   onPlayingChange?: (playing: boolean) => void;
   onOnlineChange?: (online: boolean) => void;
   onBlocked?: () => void;
+  /** Fired when the embed mute state drifts from our prop (e.g. Twitch native controls). */
+  onMutedChange?: (muted: boolean) => void;
 }
 
 let scriptPromise: Promise<void> | undefined;
@@ -140,8 +146,33 @@ function applyPaused(player: TwitchPlayerInstance, paused: boolean) {
   }
 }
 
+/** Twitch mute is independent of volume; always re-assert both so unmute is audible. */
+function applyAudio(player: TwitchPlayerInstance, muted: boolean, volume: number) {
+  const level = muted ? volume : Math.max(volume, 0.05);
+  try {
+    player.setMuted(muted);
+    player.setVolume(level);
+    // Re-assert after a tick — embed UI / autoplay policies sometimes ignore the first call.
+    window.setTimeout(() => {
+      try {
+        player.setMuted(muted);
+        player.setVolume(level);
+      } catch {
+        /* player may have been destroyed */
+      }
+    }, 0);
+  } catch {
+    try {
+      player.setMuted(muted);
+      player.setVolume(level);
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 export const TwitchPlayer = forwardRef<TwitchPlayerHandle, TwitchPlayerProps>(function TwitchPlayer(
-  { channel, muted, volume = 0.7, paused, captions, onReady, onPlayingChange, onOnlineChange, onBlocked },
+  { channel, muted, volume = 0.7, paused, captions, onReady, onPlayingChange, onOnlineChange, onBlocked, onMutedChange },
   ref,
 ) {
   const reactId = useId();
@@ -149,20 +180,52 @@ export const TwitchPlayer = forwardRef<TwitchPlayerHandle, TwitchPlayerProps>(fu
   const containerId = `twitch-player-${reactId.replaceAll(":", "")}-${zoomKey}`;
   const rootRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<TwitchPlayerInstance | null>(null);
-  const callbacksRef = useRef({ onReady, onPlayingChange, onOnlineChange, onBlocked });
+  const callbacksRef = useRef({ onReady, onPlayingChange, onOnlineChange, onBlocked, onMutedChange });
   const settingsRef = useRef({ muted, volume, captions, paused });
+  /** Ignore embed→React mute sync briefly after we push audio from the app. */
+  const ignoreEmbedMuteUntilRef = useRef(0);
   const [error, setError] = useState<string>();
 
+  const pushAudio = (nextMuted: boolean, nextVolume: number) => {
+    const player = playerRef.current;
+    if (!player) return;
+    ignoreEmbedMuteUntilRef.current = Date.now() + 500;
+    applyAudio(player, nextMuted, nextVolume);
+  };
+
   useEffect(() => {
-    callbacksRef.current = { onReady, onPlayingChange, onOnlineChange, onBlocked };
+    callbacksRef.current = { onReady, onPlayingChange, onOnlineChange, onBlocked, onMutedChange };
     settingsRef.current = { muted, volume, captions, paused };
-  }, [captions, muted, onBlocked, onOnlineChange, onPlayingChange, onReady, paused, volume]);
+  }, [captions, muted, onBlocked, onMutedChange, onOnlineChange, onPlayingChange, onReady, paused, volume]);
 
   useImperativeHandle(ref, () => ({
     play: () => playerRef.current?.play(),
     pause: () => playerRef.current?.pause(),
-    setMuted: (value) => playerRef.current?.setMuted(value),
-    setVolume: (value) => playerRef.current?.setVolume(value),
+    setMuted: (value) => {
+      const level = settingsRef.current.volume;
+      pushAudio(value, level);
+    },
+    getMuted: () => {
+      try {
+        return playerRef.current?.getMuted() ?? settingsRef.current.muted;
+      } catch {
+        return settingsRef.current.muted;
+      }
+    },
+    setVolume: (value) => {
+      pushAudio(settingsRef.current.muted, value);
+    },
+    getVolume: () => {
+      try {
+        return playerRef.current?.getVolume() ?? settingsRef.current.volume;
+      } catch {
+        return settingsRef.current.volume;
+      }
+    },
+    applyAudio: (nextMuted, nextVolume) => {
+      settingsRef.current = { ...settingsRef.current, muted: nextMuted, volume: nextVolume };
+      pushAudio(nextMuted, nextVolume);
+    },
     setCaptions: (value) => value ? playerRef.current?.enableCaptions() : playerRef.current?.disableCaptions(),
     isPaused: () => playerRef.current?.isPaused() ?? true,
     getQualities: () => playerRef.current?.getQualities() || [],
@@ -197,8 +260,8 @@ export const TwitchPlayer = forwardRef<TwitchPlayerHandle, TwitchPlayerProps>(fu
       });
       playerRef.current = player;
       player.addEventListener(Player.READY, () => {
-        player.setMuted(settingsRef.current.muted);
-        player.setVolume(settingsRef.current.volume);
+        ignoreEmbedMuteUntilRef.current = Date.now() + 500;
+        applyAudio(player, settingsRef.current.muted, settingsRef.current.volume);
         if (settingsRef.current.captions) player.enableCaptions();
         if (settingsRef.current.paused) player.pause();
         callbacksRef.current.onReady?.();
@@ -220,8 +283,26 @@ export const TwitchPlayer = forwardRef<TwitchPlayerHandle, TwitchPlayerProps>(fu
     };
   }, [channel, containerId]);
 
-  useEffect(() => { playerRef.current?.setMuted(muted); }, [muted]);
-  useEffect(() => { playerRef.current?.setVolume(volume); }, [volume]);
+  useEffect(() => {
+    pushAudio(muted, volume);
+  }, [muted, volume]);
+
+  // Sync workspace mute UI when the viewer toggles mute on the Twitch embed itself.
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const player = playerRef.current;
+      const onChange = callbacksRef.current.onMutedChange;
+      if (!player || !onChange || Date.now() < ignoreEmbedMuteUntilRef.current) return;
+      try {
+        const embedMuted = player.getMuted();
+        if (embedMuted !== settingsRef.current.muted) onChange(embedMuted);
+      } catch {
+        /* player may not be ready */
+      }
+    }, 600);
+    return () => window.clearInterval(id);
+  }, [channel, containerId]);
+
   useEffect(() => {
     const player = playerRef.current;
     if (!player || paused === undefined) return;

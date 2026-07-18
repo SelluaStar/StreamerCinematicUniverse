@@ -10,9 +10,15 @@ import { channelSearchToStreamer, searchTwitchChannels, useTwitchStreams } from 
 import { useStreamLanguage } from "@/components/features/preferences/stream-language-provider";
 import { DiscoveryDrawer } from "@/components/features/multistream/discovery-drawer";
 import { SplitLayout } from "@/components/features/multistream/split-layout";
-import { TwitchChat } from "@/components/features/multistream/twitch-chat";
+import { ChatSideDock, TwitchChat } from "@/components/features/multistream/twitch-chat";
 import { WorkspaceControls, type MobileViewMode } from "@/components/features/multistream/workspace-controls";
-import { canPlaceChatBetween, useWorkspace } from "@/components/features/multistream/use-workspace";
+import {
+  canPlaceChatBetween,
+  CHAT_DOCK_DROP_ID,
+  parseChatDragId,
+  parseChatPanelDropId,
+  useWorkspace,
+} from "@/components/features/multistream/use-workspace";
 import { parseSharedWorkspace, serializeSharedWorkspace } from "@/components/features/multistream/share-state";
 import { getSavedWorkspace, listSavedWorkspaces, deleteSavedWorkspace, saveWorkspace, WATCHSPACES_CHANGE_EVENT, type SavedWorkspace } from "@/lib/multistream/saved-workspaces";
 import { StreamAvatar } from "@/components/features/multistream/stream-avatar";
@@ -81,18 +87,27 @@ export function MultistreamPage({ announce }: { announce: (message: string) => v
   const available = twitch.streams;
   const eventStreams = campus.streams;
   const chatBetweenCapable = canPlaceChatBetween(state.streams, state.template);
-  const chatBetweenActive = chatBetweenCapable && state.chatVisible && state.chatPlacement === "between";
+  const chatBetweenActive = chatBetweenCapable && state.chatVisible && Boolean(state.betweenChatPanelId);
+  const sideChatPanels = state.sideChatPanelIds
+    .map((id) => state.chatPanels.find((panel) => panel.id === id))
+    .filter((panel): panel is NonNullable<typeof panel> => Boolean(panel));
   const useTabFocus = isMobile
     ? mobileView === "tabs"
     : (isConstrained && state.streams.length > 2 && !chatBetweenActive);
   const showStreamTray = useTabFocus && state.streams.length > 0;
   const mobileStack = isMobile && mobileView === "stack";
-  const showSideChat = state.chatVisible && !isMobile && !chatBetweenActive;
-  const showChatSheet = state.chatVisible && isMobile && !chatBetweenActive;
-  const activeDragStream = state.streams.find((stream) => stream.id === activeDragId);
-  const activeDragPreview = activeDragStream?.thumbnailUrl || (activeDragStream?.platform === "Twitch"
-    ? `https://static-cdn.jtvnw.net/previews-ttv/live_user_${encodeURIComponent(activeDragStream.login || activeDragStream.handle)}-640x360.jpg`
-    : undefined);
+  const showSideChat = state.chatVisible && !isMobile && sideChatPanels.length > 0;
+  const showChatSheet = state.chatVisible && isMobile && sideChatPanels.length > 0;
+  const activeChatDrag = activeDragId ? parseChatDragId(activeDragId) : null;
+  const activeDragStream = activeChatDrag
+    ? state.streams.find((stream) => stream.id === activeChatDrag.streamId)
+    : state.streams.find((stream) => stream.id === activeDragId);
+  const activeDragPreview = !activeChatDrag && activeDragStream
+    ? (activeDragStream.thumbnailUrl || (activeDragStream.platform === "Twitch"
+      ? `https://static-cdn.jtvnw.net/previews-ttv/live_user_${encodeURIComponent(activeDragStream.login || activeDragStream.handle)}-640x360.jpg`
+      : undefined))
+    : undefined;
+  const canvasSortableIds = state.canvasTiles.map((tile) => tile.id);
   const allMuted = state.streams.length > 0 && state.streams.every((stream) => state.muted[stream.id]);
   const allPaused = state.streams.length > 0 && state.streams.every((stream) => state.paused[stream.id]);
 
@@ -153,6 +168,10 @@ export function MultistreamPage({ announce }: { announce: (message: string) => v
         type: "load",
         streams: saved.streams,
         template: saved.template,
+        chatPanels: saved.chatPanels,
+        sideChatPanelIds: saved.sideChatPanelIds,
+        betweenChatPanelId: saved.betweenChatPanelId,
+        canvasTiles: saved.canvasTiles,
         chatStreamIds: saved.chatStreamIds,
         chatStreamId: saved.chatStreamId,
         chatPlacement: saved.chatPlacement,
@@ -176,16 +195,25 @@ export function MultistreamPage({ announce }: { announce: (message: string) => v
         announce("Shared channels could not be loaded");
         return;
       }
-      const chatLogins = shared.chats.length ? shared.chats : shared.chat ? [shared.chat] : [];
-      const chatStreamIds = chatLogins
-        .map((login) => streams.find((stream) => stream.login === login || stream.handle === login)?.id)
-        .filter((id): id is string => Boolean(id));
+      const chatPanels = (shared.chatPanels?.length ? shared.chatPanels : [shared.chats.length ? shared.chats : shared.chat ? [shared.chat] : []])
+        .map((loginsInPanel) => loginsInPanel
+          .map((login) => streams.find((stream) => stream.login === login || stream.handle === login)?.id)
+          .filter((id): id is string => Boolean(id)))
+        .filter((ids) => ids.length)
+        .map((streamIds, index) => ({ id: `cp-share-${index}`, streamIds }));
       const fallbackChat = streams.find((stream) => stream.platform === "Twitch")?.id;
+      const panels = chatPanels.length
+        ? chatPanels
+        : fallbackChat
+          ? [{ id: "cp-share-0", streamIds: [fallbackChat] }]
+          : [];
       dispatch({
         type: "load",
         streams,
         template: shared.layout,
-        chatStreamIds: chatStreamIds.length ? chatStreamIds : fallbackChat ? [fallbackChat] : [],
+        chatPanels: panels,
+        sideChatPanelIds: shared.chatPlacement === "between" && panels[0] ? panels.slice(1).map((panel) => panel.id) : panels.map((panel) => panel.id),
+        betweenChatPanelId: shared.chatPlacement === "between" ? panels[0]?.id : undefined,
         chatPlacement: shared.chatPlacement,
       });
       setMobileActiveId(streams[0]?.id);
@@ -297,35 +325,94 @@ export function MultistreamPage({ announce }: { announce: (message: string) => v
     setMobileActiveId(stream.id);
     announce(`${stream.name} added`);
   };
+  const dropOrientation = (active: DragEndEvent["active"], over: NonNullable<DragEndEvent["over"]>) => {
+    const activeRect = active.rect.current.translated;
+    const overRect = over.rect;
+    if (!activeRect || !overRect) return undefined;
+    const dx = activeRect.left + activeRect.width / 2 - (overRect.left + overRect.width / 2);
+    const dy = activeRect.top + activeRect.height / 2 - (overRect.top + overRect.height / 2);
+    return Math.abs(dy) > Math.abs(dx) ? "vertical" as const : "horizontal" as const;
+  };
   const dragEnded = ({ active, over }: DragEndEvent) => {
     setActiveDragId(undefined);
     if (!over || active.id === over.id) return;
-    // Decide orientation from where the pane was dropped relative to the target: dropping above/below
-    // stacks vertically, dropping beside keeps side-by-side. This reorganizes topology, not just order.
-    const activeRect = active.rect.current.translated;
-    const overRect = over.rect;
-    let orientation: "horizontal" | "vertical" | undefined;
-    if (activeRect && overRect) {
-      const dx = activeRect.left + activeRect.width / 2 - (overRect.left + overRect.width / 2);
-      const dy = activeRect.top + activeRect.height / 2 - (overRect.top + overRect.height / 2);
-      orientation = Math.abs(dy) > Math.abs(dx) ? "vertical" : "horizontal";
+    const activeId = String(active.id);
+    const overId = String(over.id);
+    const chatActive = parseChatDragId(activeId);
+    const orientation = dropOrientation(active, over);
+
+    if (chatActive) {
+      const overChat = parseChatDragId(overId);
+      const overPanelId = overChat?.panelId || parseChatPanelDropId(overId);
+      if (overPanelId) {
+        if (overPanelId === chatActive.panelId && overChat) {
+          dispatch({
+            type: "reorderChats",
+            panelId: chatActive.panelId,
+            activeId: chatActive.streamId,
+            overId: overChat.streamId,
+          });
+          return;
+        }
+        dispatch({
+          type: "moveChat",
+          streamId: chatActive.streamId,
+          toPanelId: overPanelId,
+          beforeStreamId: overChat?.streamId,
+        });
+        announce("Chats combined");
+        return;
+      }
+      if (overId === CHAT_DOCK_DROP_ID) {
+        dispatch({ type: "detachChat", streamId: chatActive.streamId, placement: "side" });
+        announce("Chat panel moved to side");
+        return;
+      }
+      // Dropped on a stream (or canvas tile) → new / moved inline chat panel.
+      const anchorId = state.canvasTiles.some((tile) => tile.id === overId)
+        ? overId
+        : state.streams.some((stream) => stream.id === overId)
+          ? overId
+          : undefined;
+      if (anchorId || state.streams.some((stream) => stream.id === overId)) {
+        dispatch({
+          type: "detachChat",
+          streamId: chatActive.streamId,
+          placement: "inline",
+          anchorId: anchorId || overId,
+          orientation,
+        });
+        announce(orientation === "vertical" ? "Chat panel stacked with stream" : "Chat panel placed beside stream");
+        return;
+      }
+      return;
     }
-    dispatch({ type: "reorder", activeId: String(active.id), overId: String(over.id), orientation });
-    announce(orientation === "vertical" ? "Streams stacked vertically" : "Streams arranged side by side");
+
+    // Canvas tile reorder (streams and inline chat panels).
+    dispatch({ type: "reorder", activeId, overId, orientation });
+    announce(orientation === "vertical" ? "Layout stacked vertically" : "Layout arranged side by side");
   };
   const dragStarted = ({ active }: DragStartEvent) => {
-    setActiveDragId(String(active.id));
-    announce(`Moving ${state.streams.find((stream) => stream.id === active.id)?.name || "stream"}`);
+    const id = String(active.id);
+    setActiveDragId(id);
+    const chat = parseChatDragId(id);
+    if (chat) {
+      announce(`Moving ${state.streams.find((stream) => stream.id === chat.streamId)?.name || "chat"}`);
+      return;
+    }
+    announce(`Moving ${state.streams.find((stream) => stream.id === id)?.name || "panel"}`);
   };
   const share = async () => {
-    const chats = state.chatStreamIds
+    const chatPanels = state.chatPanels.map((panel) => panel.streamIds
       .map((id) => state.streams.find((stream) => stream.id === id))
       .filter((stream): stream is Streamer => Boolean(stream))
-      .map((stream) => stream.login || stream.handle);
+      .map((stream) => stream.login || stream.handle));
+    const chats = chatPanels.flat();
     const query = serializeSharedWorkspace({
       logins: state.streams.map((stream) => stream.login || stream.handle),
       layout: state.template,
       chats,
+      chatPanels,
       chat: chats[0],
       chatPlacement: state.chatPlacement,
     });
@@ -333,22 +420,37 @@ export function MultistreamPage({ announce }: { announce: (message: string) => v
     await navigator.clipboard.writeText(url);
     announce("Share link copied");
   };
-  const chatPanel = (compact = false) => (
-    <TwitchChat
-      streams={state.streams}
-      chatStreamIds={state.chatStreamIds}
-      chatPlacement={state.chatPlacement}
-      canChatBetween={chatBetweenCapable}
-      compact={compact}
-      onAdd={(id) => dispatch({ type: "addChat", id })}
-      onRemove={(id) => dispatch({ type: "removeChat", id })}
-      onReorder={(activeId, overId) => dispatch({ type: "reorderChats", activeId, overId })}
-      onHide={() => dispatch({ type: "chat", visible: false })}
-      onChatPlacement={(placement) => {
-        dispatch({ type: "chatPlacement", placement });
-        announce(placement === "between" ? "Chat between streams" : "Chat on the side");
-      }}
-    />
+  const renderChatPanel = (panelId: string, compact = false, tileSortable = false) => {
+    const panel = state.chatPanels.find((item) => item.id === panelId);
+    if (!panel) return null;
+    return (
+      <TwitchChat
+        panelId={panel.id}
+        streams={state.streams}
+        chatStreamIds={panel.streamIds}
+        occupiedChatIds={state.chatStreamIds}
+        chatPlacement={state.chatPlacement}
+        canChatBetween={chatBetweenCapable}
+        compact={compact}
+        tileSortable={tileSortable}
+        onAdd={(id) => dispatch({ type: "addChat", id, panelId: panel.id })}
+        onRemove={(id) => dispatch({ type: "removeChat", id })}
+        onHide={() => dispatch({ type: "chat", visible: false })}
+        onChatPlacement={(placement) => {
+          dispatch({ type: "chatPlacement", placement });
+          announce(placement === "between" ? "Chat between streams" : "Chat on the side");
+        }}
+      />
+    );
+  };
+  const renderSideChats = (compact = false) => (
+    <ChatSideDock className={styles.chatSideStack}>
+      {sideChatPanels.map((panel) => (
+        <div key={panel.id} className={styles.chatSideStackItem}>
+          {renderChatPanel(panel.id, compact)}
+        </div>
+      ))}
+    </ChatSideDock>
   );
   const flashSaved = () => {
     setShowSaved(true);
@@ -361,6 +463,10 @@ export function MultistreamPage({ announce }: { announce: (message: string) => v
       name: nameDraft || currentWorkspaceName,
       streams: state.streams,
       template: state.template,
+      chatPanels: state.chatPanels,
+      sideChatPanelIds: state.sideChatPanelIds,
+      betweenChatPanelId: state.betweenChatPanelId,
+      canvasTiles: state.canvasTiles,
       chatStreamIds: state.chatStreamIds,
       chatPlacement: state.chatPlacement,
     });
@@ -378,6 +484,10 @@ export function MultistreamPage({ announce }: { announce: (message: string) => v
       name: nameDraft || "Untitled watchspace",
       streams: state.streams,
       template: state.template,
+      chatPanels: state.chatPanels,
+      sideChatPanelIds: state.sideChatPanelIds,
+      betweenChatPanelId: state.betweenChatPanelId,
+      canvasTiles: state.canvasTiles,
       chatStreamIds: state.chatStreamIds,
       chatPlacement: state.chatPlacement,
     });
@@ -394,6 +504,10 @@ export function MultistreamPage({ announce }: { announce: (message: string) => v
       type: "load",
       streams: saved.streams,
       template: saved.template,
+      chatPanels: saved.chatPanels,
+      sideChatPanelIds: saved.sideChatPanelIds,
+      betweenChatPanelId: saved.betweenChatPanelId,
+      canvasTiles: saved.canvasTiles,
       chatStreamIds: saved.chatStreamIds,
       chatStreamId: saved.chatStreamId,
       chatPlacement: saved.chatPlacement,
@@ -503,10 +617,10 @@ export function MultistreamPage({ announce }: { announce: (message: string) => v
               ))}
             </div>
           )}
-          <Group orientation="horizontal" className={styles.outerGroup}>
-            <Panel id="watchspace" minSize={showSideChat ? "55%" : "100%"}>
-              <DndContext sensors={sensors} collisionDetection={closestCenter} onDragStart={dragStarted} onDragCancel={() => setActiveDragId(undefined)} onDragEnd={dragEnded}>
-                <SortableContext items={state.streams.map((stream) => stream.id)} strategy={rectSortingStrategy}>
+          <DndContext sensors={sensors} collisionDetection={closestCenter} onDragStart={dragStarted} onDragCancel={() => setActiveDragId(undefined)} onDragEnd={dragEnded}>
+            <Group orientation="horizontal" className={styles.outerGroup}>
+              <Panel id="watchspace" minSize={showSideChat ? "55%" : "100%"}>
+                <SortableContext items={canvasSortableIds} strategy={rectSortingStrategy}>
                   <div className={styles.canvas}>
                     {tree ? (
                       <SplitLayout
@@ -515,7 +629,10 @@ export function MultistreamPage({ announce }: { announce: (message: string) => v
                         mobileActiveId={useTabFocus ? mobileActiveId : undefined}
                         mobileStack={mobileStack}
                         chatBetween={chatBetweenActive}
-                        chatNode={chatBetweenActive ? chatPanel(true) : undefined}
+                        chatNode={chatBetweenActive && state.betweenChatPanelId
+                          ? renderChatPanel(state.betweenChatPanelId, true)
+                          : undefined}
+                        renderChatPanel={(panelId, compact) => renderChatPanel(panelId, compact, true)}
                         onState={(action) => dispatch(action as Parameters<typeof dispatch>[0])}
                         onRemove={(id) => dispatch({ type: "remove", id })}
                         onFocus={(id) => dispatch({ type: "focus", id })}
@@ -524,27 +641,34 @@ export function MultistreamPage({ announce }: { announce: (message: string) => v
                     ) : <div className={styles.emptyCanvas}><b>Your watchspace is empty</b><span>Open Streams and add a Twitch channel.</span></div>}
                   </div>
                 </SortableContext>
-                <DragOverlay dropAnimation={{ duration: 180, easing: "ease-out" }}>
-                  {activeDragStream && <div className={styles.dragOverlay} aria-hidden="true">
-                    {activeDragPreview && <img src={activeDragPreview} alt="" referrerPolicy="no-referrer" decoding="async" />}
-                    <div><span>LIVE</span><b>{activeDragStream.name}</b><small>{activeDragStream.category}</small></div>
-                  </div>}
-                </DragOverlay>
-              </DndContext>
-            </Panel>
-            {showSideChat && <>
-              <Separator className={styles.chatResize}><span /></Separator>
-              <Panel id="chat" defaultSize="340px" minSize="280px" maxSize="520px" groupResizeBehavior="preserve-pixel-size">
-                {chatPanel(false)}
               </Panel>
-            </>}
-          </Group>
+              {showSideChat && <>
+                <Separator className={styles.chatResize}><span /></Separator>
+                <Panel id="chat" defaultSize="340px" minSize="280px" maxSize="520px" groupResizeBehavior="preserve-pixel-size">
+                  {renderSideChats(false)}
+                </Panel>
+              </>}
+            </Group>
 
-          {showChatSheet && (
-            <div className={styles.mobileSheet} ref={chatSheetRef} role="dialog" aria-modal="true" aria-label="Twitch chats">
-              {chatPanel(false)}
-            </div>
-          )}
+            {showChatSheet && (
+              <div className={styles.mobileSheet} ref={chatSheetRef} role="dialog" aria-modal="true" aria-label="Twitch chats">
+                {renderSideChats(false)}
+              </div>
+            )}
+
+            <DragOverlay dropAnimation={{ duration: 180, easing: "ease-out" }}>
+              {activeDragStream && (
+                <div className={styles.dragOverlay} aria-hidden="true">
+                  {activeDragPreview && <img src={activeDragPreview} alt="" referrerPolicy="no-referrer" decoding="async" />}
+                  <div>
+                    <span>{activeChatDrag ? "CHAT" : "LIVE"}</span>
+                    <b>{activeDragStream.name}</b>
+                    <small>{activeChatDrag ? "Twitch chat" : activeDragStream.category}</small>
+                  </div>
+                </div>
+              )}
+            </DragOverlay>
+          </DndContext>
 
           <WorkspaceControls
             count={state.streams.length}
