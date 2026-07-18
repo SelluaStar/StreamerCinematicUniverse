@@ -2,6 +2,10 @@
 
 SCU is a responsive event and live-stream discovery hub for creator culture, built with Next.js, React, TypeScript, Twitch Helix, and official Twitch embeds.
 
+**Live site:** https://streamer-cinematic-universe.vercel.app
+
+> This app cannot run on GitHub Pages. Pages only hosts static files; SCU needs a Node server for API routes, auth, and Twitch. Host it on **Vercel** (already configured). In the GitHub repo, turn Pages off under Settings → Pages if it is still enabled.
+
 ## Run locally
 
 ```bash

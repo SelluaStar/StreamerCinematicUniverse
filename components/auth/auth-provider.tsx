@@ -2,7 +2,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import type { Session, User } from "@supabase/supabase-js";
-import { createClient } from "@/lib/supabase/client";
+import { createClient, hasSupabasePublicEnv } from "@/lib/supabase/client";
 import type { ScuFollow, ScuProfile } from "@/lib/auth/types";
 import { hydrateSavedEventsFromCloud } from "@/lib/saved-events";
 import { hydrateWatchspacesFromCloud } from "@/lib/multistream/saved-workspaces";
@@ -21,14 +21,30 @@ type AuthContextValue = {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+const emptyAuth: AuthContextValue = {
+  ready: true,
+  session: null,
+  user: null,
+  profile: null,
+  follows: [],
+  refreshProfile: async () => null,
+  refreshFollows: async () => [],
+  signOut: async () => undefined,
+};
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const supabase = useMemo(() => createClient(), []);
-  const [ready, setReady] = useState(false);
+  const supabaseConfigured = hasSupabasePublicEnv();
+  const supabase = useMemo(() => (supabaseConfigured ? createClient() : null), [supabaseConfigured]);
+  const [ready, setReady] = useState(!supabaseConfigured);
   const [session, setSession] = useState<Session | null>(null);
   const [profile, setProfile] = useState<ScuProfile | null>(null);
   const [follows, setFollows] = useState<ScuFollow[]>([]);
 
   const refreshProfile = useCallback(async () => {
+    if (!supabase) {
+      setProfile(null);
+      return null;
+    }
     const { data: auth } = await supabase.auth.getUser();
     if (!auth.user) {
       setProfile(null);
@@ -47,6 +63,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [supabase]);
 
   const refreshFollows = useCallback(async () => {
+    if (!supabase) {
+      setFollows([]);
+      return [];
+    }
     const { data: auth } = await supabase.auth.getUser();
     if (!auth.user) {
       setFollows([]);
@@ -68,6 +88,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [supabase]);
 
   useEffect(() => {
+    if (!supabase) return;
+
     let active = true;
     const sync = async (nextSession: Session | null) => {
       if (!active) return;
@@ -105,24 +127,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [supabase, refreshProfile, refreshFollows]);
 
   const signOut = useCallback(async () => {
-    await supabase.auth.signOut();
+    if (supabase) await supabase.auth.signOut();
     setSession(null);
     setProfile(null);
     setFollows([]);
   }, [supabase]);
 
   const value = useMemo<AuthContextValue>(
-    () => ({
-      ready,
-      session,
-      user: session?.user ?? null,
-      profile,
-      follows,
-      refreshProfile,
-      refreshFollows,
-      signOut,
-    }),
-    [ready, session, profile, follows, refreshProfile, refreshFollows, signOut],
+    () =>
+      supabaseConfigured
+        ? {
+            ready,
+            session,
+            user: session?.user ?? null,
+            profile,
+            follows,
+            refreshProfile,
+            refreshFollows,
+            signOut,
+          }
+        : emptyAuth,
+    [supabaseConfigured, ready, session, profile, follows, refreshProfile, refreshFollows, signOut],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
